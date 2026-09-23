@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>POC · Wedding Guest System (DEV)</title>
+<style>
+  :root { --ink:#704652; --soft:#8E6873; --gold:#B8915E; --bg:#FFFDFC; --ok:#2E7D4F; --bad:#B3261E; --line:#EADBD3; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 -apple-system, "Segoe UI", Tahoma, sans-serif; }
+  main { max-width:560px; margin:0 auto; padding:20px 16px 40px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .dev { display:inline-block; font-size:12px; padding:2px 8px; border-radius:99px; background:#FBE9E7; color:var(--bad); font-weight:600; }
+  .muted { color:var(--soft); font-size:14px; }
+  label { display:block; font-size:14px; margin:16px 0 6px; }
+  input { width:100%; padding:12px; font-size:15px; border:1px solid var(--line); border-radius:8px; background:#fff; color:var(--ink); }
+  button { width:100%; margin-top:12px; padding:14px; font-size:16px; border:0; border-radius:10px; background:var(--ink); color:#fff; font-weight:600; }
+  button.secondary { background:#fff; color:var(--ink); border:1px solid var(--line); }
+  button:disabled { opacity:.5; }
+  .env { margin-top:12px; padding:10px 12px; border:1px solid var(--line); border-radius:8px; background:#fff; font-size:14px; }
+  ol { padding:0; list-style:none; margin:16px 0 0; }
+  li { padding:12px; border:1px solid var(--line); border-radius:8px; margin-bottom:8px; background:#fff; }
+  .row { display:flex; justify-content:space-between; gap:8px; font-weight:600; }
+  .pass { color:var(--ok); } .fail { color:var(--bad); } .wait { color:var(--soft); }
+  .detail { font-size:13px; color:var(--soft); margin-top:4px; word-break:break-word; }
+  textarea { width:100%; height:150px; margin-top:16px; font:12px/1.4 ui-monospace, Menlo, monospace; border:1px solid var(--line); border-radius:8px; padding:8px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>ทดสอบการเชื่อมต่อ Apps Script</h1>
+  <span class="dev">DEV · ข้อมูลจำลองเท่านั้น</span>
+  <p class="muted">หน้านี้ไว้ทดสอบว่ามือถือแต่ละ browser อ่าน/เขียนข้อมูลกับ Apps Script ได้ไหม ห้ามกรอกข้อมูลจริง</p>
+
+  <label for="api">Apps Script Web App URL (ลงท้าย /exec)</label>
+  <input id="api" type="url" inputmode="url" autocomplete="off" placeholder="https://script.google.com/macros/s/.../exec">
+
+  <div class="env" id="env"></div>
+
+  <button id="runAll">รันทดสอบทั้งหมด</button>
+  <ol id="results"></ol>
+
+  <textarea id="summary" readonly placeholder="ผลสรุปจะขึ้นตรงนี้ — คัดลอกส่งกลับให้ Claude"></textarea>
+  <button id="copy" class="secondary">คัดลอกผลสรุป</button>
+</main>
+
+<script>
+(function () {
+  'use strict';
+  // ใส่ URL /exec ของ DEV ตรงนี้ก่อนอัปโหลด หรือกรอกในช่องบนหน้าเว็บ
+  var DEFAULT_API = '';
+  var TIMEOUT_MS = 20000;
+
+  var apiInput = document.getElementById('api');
+  var resultsEl = document.getElementById('results');
+  var summaryEl = document.getElementById('summary');
+  var runBtn = document.getElementById('runAll');
+
+  function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } }
+  apiInput.value = DEFAULT_API || store('poc_api') || '';
+
+  function detectEnv() {
+    var ua = navigator.userAgent, b = 'Other', os = 'Other';
+    if (/Line\//i.test(ua)) b = 'LINE in-app';
+    else if (/FBAN|FBAV|FB_IAB/i.test(ua)) b = 'Facebook in-app';
+    else if (/CriOS/i.test(ua)) b = 'Chrome (iOS)';
+    else if (/FxiOS/i.test(ua)) b = 'Firefox (iOS)';
+    else if (/EdgiOS|EdgA|Edg\//i.test(ua)) b = 'Edge';
+    else if (/SamsungBrowser/i.test(ua)) b = 'Samsung Internet';
+    else if (/Chrome\//i.test(ua)) b = 'Chrome';
+    else if (/Safari\//i.test(ua)) b = 'Safari';
+    if (/iPhone|iPad|iPod/i.test(ua)) os = 'iOS';
+    else if (/Android/i.test(ua)) os = 'Android';
+    else if (/Mac OS X/i.test(ua)) os = 'macOS';
+    else if (/Windows/i.test(ua)) os = 'Windows';
+    return { browser: b, os: os };
+  }
+  var ENV = detectEnv();
+  document.getElementById('env').textContent = 'ตรวจพบ: ' + ENV.browser + ' · ' + ENV.os;
+
+  function newKey() {
+    if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+    var a = new Uint8Array(16); crypto.getRandomValues(a);
+    return Array.prototype.map.call(a, function (x) { return ('0' + x.toString(16)).slice(-2); }).join('');
+  }
+
+  function call(method, url, payload) {
+    var t0 = Date.now();
+    var ctrl = window.AbortController ? new AbortController() : null;
+    var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, TIMEOUT_MS) : null;
+    var opts = { method: method, redirect: 'follow', cache: 'no-store' };
+    if (ctrl) opts.signal = ctrl.signal;
+    if (method === 'POST') {
+      // text/plain = simple request → ไม่มี CORS preflight
+      opts.headers = { 'Content-Type': 'text/plain;charset=utf-8' };
+      opts.body = JSON.stringify(payload);
+    }
+    return fetch(url, opts).then(function (res) {
+      return res.text().then(function (text) {
+        var ms = Date.now() - t0, data;
+        try { data = JSON.parse(text); }
+        catch (e) {
+          return { ok: false, ms: ms, status: res.status,
+            cause: 'ได้คำตอบแต่ไม่ใช่ JSON — มักเป็นหน้า login ของ Google (deploy ไม่ได้ตั้ง Anyone หรือใช้ URL /dev)' };
+        }
+        return { ok: res.ok && data.ok === true, ms: ms, status: res.status, data: data,
+          cause: data.ok ? '' : ('server ตอบ error: ' + data.error) };
+      });
+    }).catch(function (err) {
+      var ms = Date.now() - t0;
+      if (err && err.name === 'AbortError') return { ok: false, ms: ms, cause: 'timeout ' + (TIMEOUT_MS / 1000) + ' วินาที — เน็ตช้าหรือ Apps Script cold start' };
+      return { ok: false, ms: ms, cause: 'browser อ่านผลไม่ได้ (' + (err && err.name) + ') — มักเป็น CORS/redirect ถูกบล็อก, สิทธิ์ deploy ไม่ใช่ Anyone หรือ URL ผิด' };
+    }).then(function (r) { if (timer) clearTimeout(timer); return r; });
+  }
+
+  function addRow(title) {
+    var li = document.createElement('li');
+    li.innerHTML = '<div class="row"><span></span><span class="wait">กำลังทดสอบ…</span></div><div class="detail"></div>';
+    li.querySelector('.row span').textContent = title;
+    resultsEl.appendChild(li);
+    return function (pass, detail) {
+      var s = li.querySelector('.row span:last-child');
+      s.className = pass ? 'pass' : 'fail';
+      s.textContent = pass ? 'ผ่าน' : 'ไม่ผ่าน';
+      li.querySelector('.detail').textContent = detail;
+    };
+  }
+
+  function runAll() {
+    var url = apiInput.value.trim();
+    resultsEl.innerHTML = ''; summaryEl.value = '';
+    if (!/^https:\/\/script\.google(usercontent)?\.com\/.+\/exec$/.test(url)) {
+      addRow('ตรวจ URL')(false, 'URL ต้องเป็นของ script.google.com และลงท้ายด้วย /exec (ห้ามใช้ /dev)');
+      return;
+    }
+    store('poc_api', url);
+    runBtn.disabled = true;
+    var lines = ['POC result · ' + ENV.browser + ' · ' + ENV.os + ' · ' + new Date().toISOString()];
+    var key = newKey(), writtenId = null;
+
+    function log(name, pass, r, extra) {
+      lines.push((pass ? 'PASS ' : 'FAIL ') + name + ' · ' + r.ms + 'ms' + (r.status ? ' · HTTP ' + r.status : '') + (extra ? ' · ' + extra : '') + (!pass && r.cause ? ' · ' + r.cause : ''));
+    }
+
+    var t1 = addRow('1. อ่าน (GET ping)');
+    call('GET', url + '?action=ping').then(function (r) {
+      var pass = r.ok; t1(pass, r.ms + ' ms' + (pass ? '' : ' · ' + r.cause)); log('GET ping', pass, r);
+      var t2 = addRow('2. เขียน (POST)');
+      return call('POST', url, { action: 'write', idempotency_key: key, label: 'POC test', client: ENV.browser + '/' + ENV.os })
+        .then(function (r) {
+          var pass = r.ok && r.data.data && r.data.data.duplicate === false;
+          if (pass) writtenId = r.data.data.id;
+          t2(pass, r.ms + ' ms' + (pass ? ' · id ' + writtenId : ' · ' + (r.cause || 'ผลไม่ตรงที่คาด'))); log('POST write', pass, r, writtenId ? 'id ' + writtenId : '');
+          var t3 = addRow('3. ส่งซ้ำด้วย key เดิม (จำลอง retry หลังเน็ตหลุด)');
+          return call('POST', url, { action: 'write', idempotency_key: key, label: 'POC test', client: ENV.browser + '/' + ENV.os })
+            .then(function (r) {
+              var pass = r.ok && r.data.data && r.data.data.duplicate === true && r.data.data.id === writtenId;
+              t3(pass, r.ms + ' ms' + (pass ? ' · ไม่สร้างแถวซ้ำ' : ' · ' + (r.cause || 'สร้างข้อมูลซ้ำหรือ id ไม่ตรง'))); log('POST retry idempotent', pass, r);
+            });
+        });
+    }).then(function () {
+      var t4 = addRow('4. อ่านกลับ (GET read) หาแถวที่เพิ่งเขียน');
+      return call('GET', url + '?action=read').then(function (r) {
+        var rows = (r.ok && r.data.data && r.data.data.rows) || [];
+        var found = rows.filter(function (x) { return x.id === writtenId; }).length;
+        var pass = r.ok && writtenId && found === 1;
+        t4(pass, r.ms + ' ms' + (pass ? ' · พบ 1 แถว' : ' · ' + (r.cause || ('พบ ' + found + ' แถว')))); log('GET read-back', pass, r, 'found ' + found);
+      });
+    }).then(function () {
+      summaryEl.value = lines.join('\n');
+      runBtn.disabled = false;
+    });
+  }
+
+  runBtn.addEventListener('click', runAll);
+  document.getElementById('copy').addEventListener('click', function () {
+    summaryEl.select();
+    var done = function () { this.textContent = 'คัดลอกแล้ว'; }.bind(this);
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(summaryEl.value).then(done, function () { document.execCommand('copy'); done(); });
+    else { document.execCommand('copy'); done(); }
+  });
+})();
+</script>
+</body>
+</html>
